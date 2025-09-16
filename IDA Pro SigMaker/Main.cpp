@@ -10,65 +10,90 @@ uint32_t PROCESSOR_ARCH;
 
 bool USE_QIS_SIGNATURE = false;
 bool WILDCARD_OPTIMIZED_INSTRUCTION = true;
+bool DO_NOT_WILDCARD_ZERO_IMM_OPERAND = true;
 size_t PRINT_TOP_X = 5;
 size_t MAX_SINGLE_SIGNATURE_LENGTH = 1000;
 size_t MAX_XREF_SIGNATURE_LENGTH = 250;
 
 std::vector<uint8_t> FILE_BUFFER = {};
 
-static uint32_t WildcardableOperandTypeBitmask = 0;
+static uint64_t WildcardableOperandTypeBitmask = 0;
 
-static bool GetOperandOffset( const insn_t& instruction, uint8_t* operandOffset, uint8_t* operandLength, uint32_t operandTypeBitmask ) {
+// A more flexible approach for returning byte indices that should be wildcarded
+static bool GetOperandWildcardBits( const insn_t& instruction, uint32_t operandTypeWildcardBitmask, uint32_t* wildcardBits ) {
 
 	// Iterate all operands
-	for( const auto& op : instruction.ops ) {
-		// Skip if we have no operand
+	for( const auto&& [i, op] : instruction.ops | std::views::enumerate ) {
+
+		// As soon as we have no operand, we can return
 		if( op.type == o_void ) {
-			continue;
+			return *wildcardBits != 0;
 		}
 
 		// Apply operand bitmask filter
-		if( ( BIT( op.type ) & operandTypeBitmask ) == 0 ) {
+		if( !GET_BIT( operandTypeWildcardBitmask, op.type ) ) {
 			continue;
 		}
 
-		*operandOffset = op.offb;
+		// Check for imm operands
+		if( op.type == o_imm && DO_NOT_WILDCARD_ZERO_IMM_OPERAND && op.value == 0 ) {
+			// Skip wildcarding if imm value is 0
+			continue;
+		}
 
 		bool isOptimizedInstr = false;
-		// Find operand length based on processor arch
+		// Handle operands based on processor arch
 		switch( PROCESSOR_ARCH ) {
-		case PLFM_ARM: // ARM, since operands are at the beginning
+		case PLFM_ARM: // ARM
+		case PLFM_MIPS: // MIPS
 		{
-			// This is somewhat of a hack because IDA api does not provide more info for ARM
-			// I always assume the operand is 3 bytes long with 1 byte operator
+			// This is somewhat of a hack because IDA api does not provide operand offb info for ARM/MIPS, because it is encoded in some bits instead of individual bytes 
+			// We can't properly wildcard the operands. What you see here is the next best approach, better than nothing
+			// I just always assume 3 bytes wildcardable operands and 1 byte operator at the end
 			if( instruction.size == 4 ) {
-				*operandLength = 3;
+				*wildcardBits = 0b0111;
 			}
 			// I saw some ADRL instruction having 8 bytes
-			if( instruction.size == 8 ) {
-				*operandLength = 7;
+			else if( instruction.size == 8 ) {
+				*wildcardBits = 0b01111111;
 			}
 			break;
 		}
 		case PLFM_386: // METAPC
 		{
-			// Usually the instruction is optimized and the operand is part of the operator and thus can't be described by offb
+			// Usually, when we have this case, the instruction is optimized, the operand consists of a few bits and is part of the operator and thus can't be described by offb
 			if( op.offb == 0 ) {
 				isOptimizedInstr = true;
 			}
+
+
 		}
+		[[fallthrough]];
 		default: // Everything else
-			*operandLength = instruction.size - op.offb;
+			// There doesnt seem to be a better way to find out the operand length, other than to check if there is a next operand
+			// By default, the operand is assumed to go to the end of the instruction
+			auto operandLength = instruction.size - op.offb;
+
+			// If there is a next valid operand
+			if( i < ( UA_MAXOP - 1 ) && instruction.ops[i + 1].type != o_void && instruction.ops[i + 1].offb > 0 ) {
+				// Then our current operand length will only go until there
+				operandLength = instruction.ops[i + 1].offb - op.offb;
+			}
+
+			// In if there is no operand length limiting, do not wildcard (if enabled)
+			if( isOptimizedInstr && operandLength == instruction.size && !WILDCARD_OPTIMIZED_INSTRUCTION ) {
+				continue;
+			}
+
+			// Set corresponding bits
+			for( uint8_t ooff = 0; ooff < operandLength; ooff++ ) {
+				*wildcardBits = SET_BIT( *wildcardBits, op.offb + ooff );
+			}
 			break;
 		}
-
-		if( isOptimizedInstr && !WILDCARD_OPTIMIZED_INSTRUCTION ) {
-	 		continue;
-		}
-
-		return true;
 	}
-	return false;
+	return *wildcardBits != 0;
+	//return false;
 }
 
 // Credit: belmeopmenieuwesim @ https://github.com/belmeopmenieuwesim/IDA-Pro-SigMaker/blob/697bebd3ecd71cb8af21ab10fb5006af8676252f/IDA%20Pro%20SigMaker/Main.cpp#L204C1-L227C52
@@ -176,7 +201,7 @@ static bool IsSignatureUnique( std::string_view idaSignature ) {
 	return FindSignatureOccurences( idaSignature, true ).size( ) == 1;
 }
 
-static std::expected<Signature, std::string> GenerateUniqueSignatureForEA( ea_t ea, bool wildcardOperands, bool continueOutsideOfFunction, uint32_t operandTypeBitmask, size_t maxSignatureLength, bool askLongerSignature = true ) {
+static std::expected<Signature, std::string> GenerateUniqueSignatureForEA( ea_t ea, bool wildcardOperands, bool continueOutsideOfFunction, uint64_t operandTypeWildcardBitmask, size_t maxSignatureLength, bool askLongerSignature = true ) {
 	if( ea == BADADDR ) {
 		return std::unexpected( "Invalid address" );
 	}
@@ -233,21 +258,17 @@ static std::expected<Signature, std::string> GenerateUniqueSignatureForEA( ea_t 
 		}
 		sigPartLength += currentInstructionLength;
 
-		// Check current instruction, add its bytes to the signature accordingly
-		uint8_t operandOffset = 0, operandLength = 0;
-		if( wildcardOperands && GetOperandOffset( instruction, &operandOffset, &operandLength, operandTypeBitmask ) && operandLength > 0 ) {
-			// Add opcodes
-			AddBytesToSignature( signature, currentAddress, operandOffset, false );
-			// Wildcards for operands
-			AddBytesToSignature( signature, currentAddress + operandOffset, operandLength, true );
-			// If the operand is on the "left side", add the operator from the "right side"
-			if( operandOffset == 0 ) {
-				AddBytesToSignature( signature, currentAddress + operandLength, currentInstructionLength - operandLength, false );
-			}
+		// A more flexible approach for wildcarding specific instructions
+		// Check current instruction, add its wildcarded bytes to the signature accordingly
+
+		uint32_t wildcardBits = 0;
+		if( wildcardOperands && GetOperandWildcardBits( instruction, operandTypeWildcardBitmask, &wildcardBits ) ) {
+			// Add opcodes and wildcards
+			AddBytesToSignature( signature, currentAddress, currentInstructionLength, wildcardBits );
 		}
 		else {
 			// No operand, add all bytes
-			AddBytesToSignature( signature, currentAddress, currentInstructionLength, false );
+			AddBytesToSignature( signature, currentAddress, currentInstructionLength, 0 );
 		}
 
 		auto currentSig = BuildIDASignatureString( signature );
@@ -262,7 +283,7 @@ static std::expected<Signature, std::string> GenerateUniqueSignatureForEA( ea_t 
 
 		// Break if we leave function
 		if( !continueOutsideOfFunction && currentFunction && get_func( currentAddress ) != currentFunction ) {
-			return std::unexpected( "Signature left function scope" );
+			return std::unexpected( "Signature left function scope. Possible fix: Check 'Continue when leaving function scope'" );
 		}
 
 	}
@@ -270,7 +291,7 @@ static std::expected<Signature, std::string> GenerateUniqueSignatureForEA( ea_t 
 }
 
 // Function for code selection
-static std::expected<Signature, std::string> GenerateSignatureForEARange( ea_t eaStart, ea_t eaEnd, bool wildcardOperands, uint32_t operandTypeBitmask ) {
+static std::expected<Signature, std::string> GenerateSignatureForEARange( ea_t eaStart, ea_t eaEnd, bool wildcardOperands, uint64_t operandTypeWildcardBitmask ) {
 	if( eaStart == BADADDR || eaEnd == BADADDR ) {
 		return std::unexpected( "Invalid address" );
 	}
@@ -309,20 +330,17 @@ static std::expected<Signature, std::string> GenerateSignatureForEARange( ea_t e
 
 		sigPartLength += currentInstructionLength;
 
-		uint8_t operandOffset = 0, operandLength = 0;
-		if( wildcardOperands && GetOperandOffset( instruction, &operandOffset, &operandLength, operandTypeBitmask ) && operandLength > 0 ) {
-			// Add opcodes
-			AddBytesToSignature( signature, currentAddress, operandOffset, false );
-			// Wildcards for operands
-			AddBytesToSignature( signature, currentAddress + operandOffset, operandLength, true );
-			// If the operand is on the "left side", add the operator from the "right side"
-			if( operandOffset == 0 ) {
-				AddBytesToSignature( signature, currentAddress + operandLength, currentInstructionLength - operandLength, false );
-			}
+		// A more flexible approach for wildcarding specific instructions
+		// Check current instruction, add its wildcarded bytes to the signature accordingly
+
+		uint32_t wildcardBits = 0;
+		if( wildcardOperands && GetOperandWildcardBits( instruction, operandTypeWildcardBitmask, &wildcardBits ) ) {
+			// Add opcodes and wildcards
+			AddBytesToSignature( signature, currentAddress, currentInstructionLength, wildcardBits );
 		}
 		else {
 			// No operand, add all bytes
-			AddBytesToSignature( signature, currentAddress, currentInstructionLength, false );
+			AddBytesToSignature( signature, currentAddress, currentInstructionLength, 0 );
 		}
 		currentAddress += currentInstructionLength;
 
@@ -347,7 +365,7 @@ static void PrintSignatureForEA( const std::expected<Signature, std::string>& si
 	}
 }
 
-static void FindXRefs( ea_t ea, bool wildcardOperands, bool continueOutsideOfFunction, std::vector<std::tuple<ea_t, Signature>>& xrefSignatures, size_t maxSignatureLength, uint32_t operandTypeBitmask ) {
+static void FindXRefs( ea_t ea, bool wildcardOperands, bool continueOutsideOfFunction, std::vector<std::tuple<ea_t, Signature>>& xrefSignatures, size_t maxSignatureLength, uint64_t operandTypeWildcardBitmask ) {
 	xrefblk_t xref{};
 
 	// Count code xrefs
@@ -377,7 +395,7 @@ static void FindXRefs( ea_t ea, bool wildcardOperands, bool continueOutsideOfFun
 		replace_wait_box( "Processing xref %llu of %llu (%0.1f%%)...\n\nSuitable Signatures: %llu\nShortest Signature: %llu Bytes", i + 1, xrefCount, ( static_cast<float>( i ) / xrefCount ) * 100.0f, xrefSignatures.size( ), ( shortestSignatureLength <= maxSignatureLength ? shortestSignatureLength : 0 ) );
 
 		// Genreate signature for xref
-		auto signature = GenerateUniqueSignatureForEA( xref.from, wildcardOperands, continueOutsideOfFunction, operandTypeBitmask, maxSignatureLength, false );
+		auto signature = GenerateUniqueSignatureForEA( xref.from, wildcardOperands, continueOutsideOfFunction, operandTypeWildcardBitmask, maxSignatureLength, false );
 		if( !signature.has_value( ) ) {
 			continue;
 		}
@@ -414,11 +432,11 @@ static void PrintXRefSignaturesForEA( ea_t ea, const std::vector<std::tuple<ea_t
 	}
 }
 
-static void PrintSelectedCode( ea_t start, ea_t end, SignatureType sigType, bool wildcardOperands, uint32_t operandBitmask ) {
+static void PrintSelectedCode( ea_t start, ea_t end, SignatureType sigType, bool wildcardOperands, uint64_t operandTypeWildcardBitmask ) {
 	const auto selectionSize = end - start;
 	// Create signature of fixed size from selection
 
-	auto signature = GenerateSignatureForEARange( start, end, wildcardOperands, operandBitmask );
+	auto signature = GenerateSignatureForEARange( start, end, wildcardOperands, operandTypeWildcardBitmask );
 	if( !signature.has_value( ) ) {
 		msg( "Error: %s\n", signature.error( ).c_str( ) );
 		return;
@@ -458,7 +476,7 @@ static void SearchSignatureString( std::string input ) {
 		// Search for \x00\x11\x22 type arrays
 		if( GetRegexMatches( input, std::regex( R"(\\x(?:[0-9A-F]{2}))", std::regex_constants::icase ), rawByteStrings ) && rawByteStrings.size( ) == stringMask.length( ) ) {
 			Signature convertedSignature;
-			for( size_t i = 0; const auto & m : rawByteStrings ) {
+			for( size_t i = 0; const auto& m : rawByteStrings ) {
 				SignatureByte b{ std::stoi( m.substr( 2 ), nullptr, 16 ), stringMask[i++] == '?' };
 				convertedSignature.push_back( b );
 			}
@@ -467,7 +485,7 @@ static void SearchSignatureString( std::string input ) {
 		// Search for 0x00, 0x11, 0x22 type arrays
 		else if( GetRegexMatches( input, std::regex( R"((?:0x(?:[0-9A-F]{2}))+)", std::regex_constants::icase ), rawByteStrings ) && rawByteStrings.size( ) == stringMask.length( ) ) {
 			Signature convertedSignature;
-			for( size_t i = 0; const auto & m : rawByteStrings ) {
+			for( size_t i = 0; const auto& m : rawByteStrings ) {
 				SignatureByte b{ std::stoi( m.substr( 2 ), nullptr, 16 ), stringMask[i++] == '?' };
 				convertedSignature.push_back( b );
 			}
@@ -504,7 +522,7 @@ static void SearchSignatureString( std::string input ) {
 
 			if( GetRegexMatches( input, std::regex( R"(\\x(?:[0-9A-F]{2}))", std::regex_constants::icase ), rawByteStrings ) && rawByteStrings.size( ) > 1 ) {
 				Signature convertedSignature;
-				for( size_t i = 0; const auto & m : rawByteStrings ) {
+				for( size_t i = 0; const auto& m : rawByteStrings ) {
 					SignatureByte b{ std::stoi( m.substr( 2 ), nullptr, 16 ), false };
 					convertedSignature.push_back( b );
 				}
@@ -513,7 +531,7 @@ static void SearchSignatureString( std::string input ) {
 			// Search for 0x00, 0x11, 0x22 type arrays
 			else if( GetRegexMatches( input, std::regex( R"((?:0x(?:[0-9A-F]{2}))+)", std::regex_constants::icase ), rawByteStrings ) && rawByteStrings.size( ) > 1 ) {
 				Signature convertedSignature;
-				for( size_t i = 0; const auto & m : rawByteStrings ) {
+				for( size_t i = 0; const auto& m : rawByteStrings ) {
 					SignatureByte b{ std::stoi( m.substr( 2 ), nullptr, 16 ), false };
 					convertedSignature.push_back( b );
 				}
@@ -552,13 +570,13 @@ static void ConfigureOperandWildcardBitmask( ) {
 		"STARTITEM 0\n"                                                         // TabStop
 		"Wildcardable Operands\n"                                               // Title
 		"Select operand types that should be wildcarded:\n"                     // Header
-		"<General Register (al,ax,es,ds...):C>\n"                               // Radio Button 0
-		"<Direct Memory Reference  (DATA):C>\n"                                 // Radio Button 1
-		"<Memory Ref [Base Reg + Index Reg]:C>\n"                               // Radio Button 2
-		"<Memory Ref [Base Reg + Index Reg + Displacement]:C>\n"                // Radio Button 3
-		"<Immediate Value:C>\n"                                                 // Radio Button 4
-		"<Immediate Far Address  (CODE):C>\n"                                   // Radio Button 5
-		"<Immediate Near Address (CODE):C>";                                    // Radio Button 6
+		"<General Register (al,ax,es,ds...):C>\n"                               // Radio Button 0 o_reg
+		"<Direct Memory Reference  (DATA):C>\n"                                 // Radio Button 1 o_mem
+		"<Memory Ref [Base Reg + Index Reg]:C>\n"                               // Radio Button 2 o_phrase
+		"<Memory Ref [Base Reg + Index Reg + Displacement]:C>\n"                // Radio Button 3 o_displ
+		"<Immediate Value:C>\n"                                                 // Radio Button 4 o_imm
+		"<Immediate Far Address  (CODE):C>\n"                                   // Radio Button 5 o_far
+		"<Immediate Near Address (CODE):C>";                                    // Radio Button 6 o_near
 	formString << baseOptions;
 
 	// Processor specific wildcards
@@ -600,7 +618,7 @@ static void ConfigureOperandWildcardBitmask( ) {
 	}
 
 	// Shift by one because we skip o_void
-	uint32_t options = WildcardableOperandTypeBitmask >> 1;
+	auto options = WildcardableOperandTypeBitmask >> 1;
 	if( ask_form( formString.str( ).c_str( ), &options ) ) {
 		WildcardableOperandTypeBitmask = ( options << 1 );
 	}
@@ -630,6 +648,7 @@ bool idaapi plugin_ctx_t::run( size_t ) {
 			WildcardableOperandTypeBitmask =
 				/*BIT( o_reg ) | */ BIT( o_mem ) | BIT( o_phrase ) | BIT( o_displ ) | BIT( o_far ) | BIT( o_near ) | BIT( o_imm ) |
 				BIT( o_trreg ) | BIT( o_dbreg ) | BIT( o_crreg ) | BIT( o_fpreg ) | BIT( o_mmxreg ) | BIT( o_xmmreg ) | BIT( o_xmmreg ) | BIT( o_ymmreg ) | BIT( o_zmmreg ) | BIT( o_kreg );
+			// Debateable: should wildcarding o_phrase be enabled by default?
 			break;
 		case PLFM_ARM:
 			WildcardableOperandTypeBitmask =
@@ -669,7 +688,8 @@ bool idaapi plugin_ctx_t::run( size_t ) {
 		"Quick Options:\n"                                                                                                                                                  // Title
 		"<#Enable wildcarding for operands, to improve stability of created signatures#Wildcards for operands:C>\n"                                                   // Checkbox Button 0                                            
 		"<#Don't stop signature generation when reaching end of function#Continue when leaving function scope:C>\n"                                                   // Checkbox Button 1
-		"<#Wildcard the whole instruction when the operand (usually a register) is encoded into the operator#Wildcard optimized / combined instructions:C>>\n"        // Checkbox Button 2																										  // Checkbox Button 2
+		"<#Wildcard the whole instruction when the operand (usually a register) is encoded into the operator#Wildcard optimized / combined instructions:C>\n"         // Checkbox Button 2															
+		"<#Do not wildcard immediate zero operands, which can e.g. be used for checking null pointers. They should not change across binary revisions.#Do not wildcard 0-Operands:C>>\n" // Checkbox Button 3
 		"<#Configure operand types that should be wildcarded#Operand types...:B::::>"                                                                                 // Button 0
 		"<#Other options#Options...:B::::>\n";                                                                                                                        // Button 1
 
@@ -685,12 +705,13 @@ bool idaapi plugin_ctx_t::run( size_t ) {
 
 	static short action = 0;
 	static short outputFormat = 0;
-	static short options = ( 1 << 0 | 0 << 1 | WILDCARD_OPTIMIZED_INSTRUCTION << 2 );
+	static short options = ( 1 << 0 | 0 << 1 | WILDCARD_OPTIMIZED_INSTRUCTION << 2 | DO_NOT_WILDCARD_ZERO_IMM_OPERAND << 3 );
 
 	if( ask_form( formString.str( ).c_str( ), &action, &outputFormat, &options, &ConfigureOperandWildcardBitmask, &ConfigureOptions ) ) {
 		const auto wildcardOperands = options & ( 1 << 0 );
 		const auto continueOutsideOfFunction = options & ( 1 << 1 );
 		WILDCARD_OPTIMIZED_INSTRUCTION = options & ( 1 << 2 );
+		DO_NOT_WILDCARD_ZERO_IMM_OPERAND = options & ( 1 << 3 );
 
 		const auto sigType = static_cast<SignatureType>( outputFormat );
 		switch( action ) {

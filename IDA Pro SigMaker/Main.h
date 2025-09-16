@@ -6,10 +6,12 @@
 #include <sstream>
 #include <format>
 #include <vector>
+#include <ranges>
 
 
 #include "Version.h"
 #include "Plugin.h"
+#include "Utils.h"
 
 // Signature types and structures
 enum class SignatureType : uint32_t {

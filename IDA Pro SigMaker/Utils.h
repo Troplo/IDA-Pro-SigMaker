@@ -12,6 +12,12 @@
 
 bool SetClipboardText( std::string_view text );
 bool GetRegexMatches( std::string string, std::regex regex, std::vector<std::string>& matches );
-constexpr auto BIT( uint32_t x ) {
-    return 1LLU << x;
+constexpr auto BIT( uint8_t index ) {
+	return 1LLU << index;
+}
+constexpr auto SET_BIT( auto x, uint8_t index ) {
+	return x | BIT( index );
+}
+constexpr bool GET_BIT( auto x, uint8_t index ) {
+	return x & BIT( index );
 }

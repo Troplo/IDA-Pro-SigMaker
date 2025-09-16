@@ -9,5 +9,5 @@ std::string FormatSignature( const Signature& signature, SignatureType type );
 
 // Utility functions
 void AddByteToSignature( Signature& signature, ea_t address, bool wildcard );
-void AddBytesToSignature( Signature& signature, ea_t address, size_t count, bool wildcard );
+void AddBytesToSignature( Signature& signature, ea_t address, size_t count, uint32_t wildcardBits );
 void TrimSignature( Signature& signature );
