@@ -229,9 +229,9 @@ static std::expected<Signature, std::string> GenerateUniqueSignatureForEA( ea_t 
 				return std::unexpected( "Failed to decode first instruction" );
 			}
 
-			msg( "Signature reached end of executable code @ %I64X\n", currentAddress );
+			msg( "Signature reached end of executable code @ %016" PRI64_X "\n", currentAddress );
 			auto signatureString = BuildIDASignatureString( signature );
-			msg( "NOT UNIQUE Signature for %I64X: %s\n", ea, signatureString.c_str( ) );
+			msg( "NOT UNIQUE Signature for %016" PRI64_X ": %s\n", ea, signatureString.c_str( ) );
 			return std::unexpected( "Signature not unique" );
 		}
 
@@ -245,7 +245,7 @@ static std::expected<Signature, std::string> GenerateUniqueSignatureForEA( ea_t 
 				else if( result == 0 ) { // No
 					// Print the signature we have so far, even though its not unique
 					auto signatureString = BuildIDASignatureString( signature );
-					msg( "NOT UNIQUE Signature for %I64X: %s\n", ea, signatureString.c_str( ) );
+					msg( "NOT UNIQUE Signature for %016" PRI64_X ": %s\n", ea, signatureString.c_str( ) );
 					return std::unexpected( "Signature not unique" );
 				}
 				else { // Cancel
@@ -319,7 +319,7 @@ static std::expected<Signature, std::string> GenerateSignatureForEARange( ea_t e
 				return std::unexpected( "Failed to decode first instruction" );
 			}
 
-			msg( "Signature reached end of executable code @ %I64X\n", currentAddress );
+			msg( "Signature reached end of executable code @ %016" PRI64_X "\n", currentAddress );
 			// If we have some bytes left, add them
 			if( currentAddress < eaEnd ) {
 				AddBytesToSignature( signature, currentAddress, eaEnd - currentAddress, false );
@@ -359,7 +359,7 @@ static void PrintSignatureForEA( const std::expected<Signature, std::string>& si
 		return;
 	}
 	const auto signatureStr = FormatSignature( signature.value( ), sigOutputType );
-	msg( "Signature for %I64X: %s\n", ea, signatureStr.c_str( ) );
+	msg( "Signature for %016" PRI64_X ": %s\n", ea, signatureStr.c_str( ) );
 	if( !SetClipboardText( signatureStr ) ) {
 		msg( "Failed to copy to clipboard!" );
 	}
@@ -419,11 +419,11 @@ static void PrintXRefSignaturesForEA( ea_t ea, const std::vector<std::tuple<ea_t
 	}
 
 	auto topLength = std::min( topCount, xrefSignatures.size( ) );
-	msg( "Top %llu Signatures out of %llu suitable xrefs for %I64X:\n", topLength, xrefSignatures.size( ), ea );
+	msg( "Top %llu Signatures out of %llu suitable xrefs for %016" PRI64_X ":\n", topLength, xrefSignatures.size( ), ea );
 	for( size_t i = 0; i < topLength; i++ ) {
 		const auto& [originAddress, signature] = xrefSignatures[i];
 		const auto signatureStr = FormatSignature( signature, sigType );
-		msg( "XREF Signature #%i @ %I64X: %s\n", i + 1, originAddress, signatureStr.c_str( ) );
+		msg( "XREF Signature #%i @ %016" PRI64_X ": %s\n", i + 1, originAddress, signatureStr.c_str( ) );
 
 		// Copy first signature only
 		if( i == 0 ) {
@@ -443,7 +443,7 @@ static void PrintSelectedCode( ea_t start, ea_t end, SignatureType sigType, bool
 	}
 
 	const auto signatureStr = FormatSignature( signature.value( ), sigType );
-	msg( "Code for %I64X-%I64X: %s\n", start, end, signatureStr.c_str( ) );
+	msg( "Code for %016" PRI64_X "-%016" PRI64_X ": %s\n", start, end, signatureStr.c_str( ) );
 	SetClipboardText( signatureStr );
 }
 
@@ -559,7 +559,7 @@ static void SearchSignatureString( std::string input ) {
 		return;
 	}
 	for( const auto& ea : signatureMatches ) {
-		msg( "Match @ %I64X\n", ea );
+		msg( "Match @ %016" PRI64_X "\n", ea );
 	}
 }
 

@@ -4,6 +4,13 @@
 #include <windows.h>
 #endif
 
+#if defined(_MSC_VER)
+    #define PRI64_X "I64X"
+#else
+    #include <cinttypes>
+    #define PRI64_X PRIX64
+#endif
+
 #include <expected>
 #include <string>
 #include <sstream>
