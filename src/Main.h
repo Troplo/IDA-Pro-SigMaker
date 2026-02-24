@@ -1,6 +1,9 @@
 #pragma once
+#if WIN32
 #define NOMINMAX
-#include <Windows.h>
+#include <windows.h>
+#endif
+
 #include <expected>
 #include <string>
 #include <sstream>

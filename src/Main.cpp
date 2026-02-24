@@ -667,7 +667,11 @@ bool idaapi plugin_ctx_t::run( size_t ) {
 	}
 
 	// Check for AVX2, to use qis' signature scanning library for faster signature creation
-	if( IsProcessorFeaturePresent( PF_AVX2_INSTRUCTIONS_AVAILABLE ) ) {
+#if !WIN32
+	if (__builtin_cpu_supports("avx2")) {
+#else
+	if (IsProcessorFeaturePresent(PF_AVX2_INSTRUCTIONS_AVAILABLE)) {
+#endif
 		USE_QIS_SIGNATURE = true;
 	}
 

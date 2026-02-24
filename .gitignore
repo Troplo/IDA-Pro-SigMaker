@@ -2,3 +2,5 @@
 *.vcxproj.user
 x64/
 Release/
+build/
+.idea

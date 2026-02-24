@@ -1,7 +1,7 @@
 #pragma once
+#define USE_DANGEROUS_FUNCTIONS
 #include <ida.hpp>
 #include <idp.hpp>
-
 #include <loader.hpp>
 #include <search.hpp>
 

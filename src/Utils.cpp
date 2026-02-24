@@ -1,5 +1,19 @@
 #include "Utils.h"
 
+#ifndef _WIN32
+#include <cstdio>
+
+bool SetClipboardText(std::string_view text)
+{
+    FILE* pipe = popen("xclip -selection clipboard", "w");
+    if (!pipe)
+        return false;
+
+    fwrite(text.data(), 1, text.size(), pipe);
+    pclose(pipe);
+    return true;
+}
+#else
 bool SetClipboardText( std::string_view text ) {
     if( text.empty( ) ) {
         return false;
@@ -34,7 +48,7 @@ bool SetClipboardText( std::string_view text ) {
 
     return true;
 }
-
+#endif
 bool GetRegexMatches( std::string string, std::regex regex, std::vector<std::string>& matches ) {
     std::sregex_iterator iter( string.begin( ), string.end( ), regex );
     std::sregex_iterator end;
